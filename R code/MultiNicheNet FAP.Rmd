@@ -1,0 +1,462 @@
+
+---
+title: "MultiNicheNet analysis to find trajectories cross different conditions"
+---
+
+This markdown files runs through the entire process of using MultiNicheNet along with a few custom functions to create multicellular disease models of different disease stages and find potentially important ligands or genes. 
+
+# Load libraries
+```{r}
+# # install.packages("devtools")
+# devtools::install_github("saeyslab/nichenetr",force = TRUE)
+# devtools::install_github("saeyslab/multinichenetr",force = TRUE)
+```
+
+Load libraries and define the output directory here for all saved results.
+
+```{r load-libs, message = FALSE,  warning = FALSE}
+#rm(list = ls())
+library(SingleCellExperiment)
+library(dplyr)
+library(ggplot2)
+library(nichenetr)
+library(multinichenetr)
+library(Seurat)
+library(tidyverse)
+library(zellkonverter)
+
+
+output_dir = "~/DT/FAP/"
+if (dir.exists(output_dir)==F) {
+  dir.create(output_dir, showWarnings = FALSE)
+} else {
+  print("The directory already exists")
+}
+```
+
+# Set up parameters
+
+Here, set up the experiment parameters which will dictate which stages are chosen, the different contrasts to calculate and so on.
+
+```{r}
+Disease = "FAP"
+```
+
+#1  Load and preprocess scRNA data
+
+```{r}
+sce = readRDS(file = "~/DT/FAP/colon_all_samples_ctL2.rds")
+sce <- as.SingleCellExperiment(sce)
+sce <- sce %>% makenames_SCE()
+sce = alias_to_symbol_SCE(sce, "human") %>% makenames_SCE()
+```
+The Single Cell Experiment Object data structure can have slight differences based on the data set, the following are a few exploratory commands to investigate the data structure. Change fields as required by your data.
+
+In this case, we need on FAP Unaffected and Polyp and HC disease states
+
+
+```{r}
+# check basic info
+table(sce@colData$group, sce@colData$diseasestatus)
+table(sce@colData$diseasestatus,sce@colData$cell_type_L2)
+```
+
+Now, define the groups we are interested in and filter SCE object for those groups only.
+
+```{r}
+## select samples
+group_vec <- c('FAP_Polyp','FAP_Unaffected','Healthy_Normal')
+sce <- sce[,(sce$group %in% group_vec)]
+```
+
+Confirm that the filter has worked as expected.
+
+```{r}
+# recheck info 
+table(sce@colData$group, sce@colData$diseasestatus)
+```
+
+
+#2 Preparation of the MultiNicheNet core analysis
+
+
+## Load NicheNet's ligand-receptor network and ligand-target matrix
+```{r}
+organism = 'human'
+lr_network_all = readRDS(url("https://zenodo.org/record/10229222/files/lr_network_human_allInfo_30112033.rds")) %>% mutate(ligand = convert_alias_to_symbols(ligand, organism = organism), receptor = convert_alias_to_symbols(receptor, organism = organism))
+  
+lr_network_all = lr_network_all  %>% mutate(ligand = make.names(ligand), receptor = make.names(receptor)) 
+  
+lr_network = lr_network_all %>% distinct(ligand, receptor)
+
+ligand_target_matrix = readRDS(file = '~/DT/ligand_target_matrix_nsga2r_final.rds')
+ 
+colnames(ligand_target_matrix) = colnames(ligand_target_matrix) %>% 
+    convert_alias_to_symbols(organism = organism) %>% make.names()
+rownames(ligand_target_matrix) = rownames(ligand_target_matrix) %>% 
+    convert_alias_to_symbols(organism = organism) %>% make.names()
+  
+lr_network = lr_network %>% filter(ligand %in% colnames(ligand_target_matrix))
+ligand_target_matrix = ligand_target_matrix[, lr_network$ligand %>% unique()]
+```
+
+
+## Prepare the settings of the MultiNicheNet cell-cell communication analysis
+### Define parameters for multinichenetr
+
+```{r}
+# check that these values are correct
+sample_id = "ID"
+group_id = "group"
+celltype_id = "cell_type_L2" # consider cell_type_L1 as alternative?
+covariates = NA
+batches = NA #"Batch"
+
+SummarizedExperiment::colData(sce)$ID = SummarizedExperiment::colData(sce)$ID %>% make.names()
+SummarizedExperiment::colData(sce)$group = SummarizedExperiment::colData(sce)$group %>% make.names()
+SummarizedExperiment::colData(sce)$cell_type_L2 = SummarizedExperiment::colData(sce)$cell_type_L2 %>% make.names()
+```
+
+### Define the contrasts of interest.
+```{r}
+contrasts_oi_list = list(c("'FAP_Polyp-FAP_Unaffected'"),c("'FAP_Unaffected-Healthy_Normal','FAP_Polyp-Healthy_Normal'"))
+
+contrast_tbl_list = list(tibble(contrast =c('FAP_Polyp-FAP_Unaffected'),group = c("FAP_Polyp")),
+                      tibble(contrast =c('FAP_Unaffected-Healthy_Normal','FAP_Polyp-Healthy_Normal'),group = c("FAP_Unaffected","FAP_Polyp")))
+
+```
+
+
+# Run MultiNichenet core function
+### We run all possible celltype pairs
+```{r}
+senders_oi = SummarizedExperiment::colData(sce)[,celltype_id] %>% unique()
+receivers_oi = SummarizedExperiment::colData(sce)[,celltype_id] %>% unique()
+sce = sce[, SummarizedExperiment::colData(sce)[,celltype_id] %in% 
+            c(senders_oi, receivers_oi)]
+```
+
+# Running the MultiNicheNet core analysis
+## Cell-type filtering: determine which cell types are sufficiently present
+```{r}
+min_cells = 10
+abundance_info = get_abundance_info(
+  sce = sce, 
+  sample_id = sample_id, group_id = group_id, celltype_id = celltype_id, 
+  min_cells = min_cells, 
+  senders_oi = senders_oi, receivers_oi = receivers_oi, 
+  batches = batches
+  )
+```
+
+### Interpretation of cell type abundance information
+```{r}
+abundance_info$abund_plot_sample
+```
+ 
+### Cell type filtering based on cell type abundance information
+
+Running the following block of code can help you determine which cell types are condition-specific and which cell types are absent. 
+
+```{r}
+abundance_df_summarized = abundance_info$abundance_data %>% 
+  mutate(keep = as.logical(keep)) %>% 
+  group_by(group_id, celltype_id) %>% 
+  summarise(samples_present = sum((keep)))
+
+celltypes_absent_one_condition = abundance_df_summarized %>% 
+  filter(samples_present == 0) %>% pull(celltype_id) %>% unique() 
+# find truly condition-specific cell types by searching for cell types 
+# truely absent in at least one condition
+
+celltypes_present_one_condition = abundance_df_summarized %>% 
+  filter(samples_present >= 2) %>% pull(celltype_id) %>% unique() 
+# require presence in at least 2 samples of one group so 
+# it is really present in at least one condition
+
+condition_specific_celltypes = intersect(
+  celltypes_absent_one_condition, 
+  celltypes_present_one_condition)
+
+total_nr_conditions = SummarizedExperiment::colData(sce)[,group_id] %>% 
+  unique() %>% length() 
+
+filtered_df <- abundance_df_summarized %>% 
+  filter(samples_present < 2)
+
+absent_celltypes = abundance_df_summarized %>% 
+  filter(samples_present < 2) %>% 
+  group_by(celltype_id) %>% 
+  count() %>% 
+  filter(n == total_nr_conditions) %>% 
+  pull(celltype_id)
+  
+print("condition-specific celltypes:")
+print(condition_specific_celltypes)
+  
+print("absent celltypes:")
+print(absent_celltypes)
+```
+### define whether we want to use condition specific cell types
+```{r}
+analyse_condition_specific_celltypes = FALSE
+if(analyse_condition_specific_celltypes == TRUE){
+  senders_oi = senders_oi %>% setdiff(absent_celltypes)
+  receivers_oi = receivers_oi %>% setdiff(absent_celltypes)
+} else {
+  senders_oi = senders_oi %>% 
+    setdiff(union(absent_celltypes, condition_specific_celltypes))
+  receivers_oi = receivers_oi %>% 
+    setdiff(union(absent_celltypes, condition_specific_celltypes))
+}
+
+print(senders_oi)
+print(receivers_oi)
+
+sce = sce[, SummarizedExperiment::colData(sce)[,celltype_id] %in% 
+            c(senders_oi, receivers_oi)
+          ]
+```
+
+## Gene filtering
+```{r}
+min_sample_prop = 0.50
+fraction_cutoff = 0.05
+
+frq_list = get_frac_exprs(
+  sce = sce, 
+  sample_id = sample_id, celltype_id =  celltype_id, group_id = group_id, 
+  batches = batches, 
+  min_cells = min_cells, 
+  fraction_cutoff = fraction_cutoff, min_sample_prop = min_sample_prop)
+```
+
+
+```{r}
+genes_oi = frq_list$expressed_df %>% 
+  filter(expressed == TRUE) %>% pull(gene) %>% unique() 
+sce = sce[genes_oi, ]
+```
+
+## Pseudobulk expression calculation: determine and normalize per-sample pseudobulk expression levels for each expressed gene in each present cell type
+```{r}
+gc()
+abundance_expression_info = process_abundance_expression_info(
+  sce = sce, 
+  sample_id = sample_id, group_id = group_id, celltype_id = celltype_id, 
+  min_cells = min_cells, 
+  senders_oi = senders_oi, receivers_oi = receivers_oi, 
+  lr_network = lr_network, 
+  batches = batches, 
+  frq_list = frq_list, 
+  abundance_info = abundance_info)
+```
+
+Normalized pseudobulk expression values can be inspected by:
+
+```{r}
+abundance_expression_info$celltype_info$pb_df %>% head()
+abundance_expression_info$celltype_info$pb_df_group %>% head()
+abundance_expression_info$sender_receiver_info$pb_df %>% head()
+abundance_expression_info$sender_receiver_info$pb_df_group %>% head()
+```
+
+## Start to loop by contrast_oi: 
+
+The loop below runs the remaining multinichenet analysis for the different contrasts defined and saves the results to `output_dir`.
+```{r}
+for (i in 1:length(contrasts_oi_list)){
+  
+  contrasts_oi = contrasts_oi_list[[1]]
+  contrast_tbl = contrast_tbl_list[[1]]
+  
+  #Differential expression (DE) analysis: determine which genes are differentially expressed
+  DE_info = get_DE_info(
+    sce = sce, 
+    sample_id = sample_id, group_id = group_id, celltype_id = celltype_id, 
+    batches = batches, covariates = covariates, 
+    contrasts_oi = contrasts_oi, 
+    min_cells = min_cells, 
+    expressed_df = frq_list$expressed_df)
+  write.csv(DE_info$celltype_de$de_output_tidy, file =  paste0(output_dir,"DE_output","_contrastlist_",i,".csv"))
+  
+  empirical_pval = FALSE
+  
+  if(empirical_pval == TRUE){
+  DE_info_emp = get_empirical_pvals(DE_info$celltype_de$de_output_tidy)
+  celltype_de = DE_info_emp$de_output_tidy_emp %>% select(-p_val, -p_adj) %>% 
+    rename(p_val = p_emp, p_adj = p_adj_emp)
+  } else {
+  celltype_de = DE_info$celltype_de$de_output_tidy
+  } 
+  
+  sender_receiver_de = multinichenetr::combine_sender_receiver_de(sender_de = celltype_de,
+  receiver_de = celltype_de,
+  senders_oi = senders_oi,
+  receivers_oi = receivers_oi,
+  lr_network = lr_network
+  )
+  write.csv(sender_receiver_de, file = paste0(output_dir,"sender_receiver_DE_",i,".csv"))
+
+  logFC_threshold = 0.50
+  p_val_threshold = 0.05
+  
+  p_val_adj = FALSE
+  
+  geneset_assessment = contrast_tbl$contrast %>% 
+  lapply(
+    process_geneset_data, 
+    celltype_de, logFC_threshold, p_val_adj, p_val_threshold
+  ) %>% 
+  bind_rows() 
+# geneset_assessment
+
+  geneset_assessment_adjustedPval = contrast_tbl$contrast %>% 
+  lapply(
+    process_geneset_data, 
+    celltype_de, logFC_threshold, p_val_adj = TRUE, p_val_threshold
+    ) %>% 
+  bind_rows() 
+# geneset_assessment_adjustedPval
+  
+  top_n_target = 250
+  verbose = TRUE
+  cores_system = 10
+  n.cores = min(cores_system, celltype_de$cluster_id %>% unique() %>% length())
+  
+  ligand_activities_targets_DEgenes = suppressMessages(suppressWarnings(
+  get_ligand_activities_targets_DEgenes(
+    receiver_de = celltype_de,
+    receivers_oi = intersect(receivers_oi, celltype_de$cluster_id %>% unique()),
+    ligand_target_matrix = ligand_target_matrix,
+    logFC_threshold = logFC_threshold,
+    p_val_threshold = p_val_threshold,
+    p_val_adj = p_val_adj,
+    top_n_target = top_n_target,
+    verbose = verbose,
+    n.cores = n.cores
+  )
+  ))
+
+  write.csv(ligand_activities_targets_DEgenes$ligand_activities, file = paste0(output_dir, "ligand_activities_targets_DEgenes_",i,".csv"))
+  saveRDS(ligand_activities_targets_DEgenes, file = paste0(output_dir, "ligand_activities_targets_DEgenes_",i,".rds"))
+  
+  
+  ligand_activity_down = TRUE
+  
+  ligand_de_status = TRUE
+  if(ligand_de_status == TRUE)
+  {
+    sender_receiver_de = sender_receiver_de %>% filter(p_val_ligand < p_val_threshold) %>% filter(abs(lfc_ligand) >  logFC_threshold)
+  }
+  
+  sender_receiver_tbl = sender_receiver_de %>% distinct(sender, receiver)
+
+  metadata_combined = SummarizedExperiment::colData(sce) %>% tibble::as_tibble()
+  
+  if(!is.na(batches)){
+    grouping_tbl = metadata_combined[,c(sample_id, group_id, batches)] %>% 
+      tibble::as_tibble() %>% distinct()
+    colnames(grouping_tbl) = c("sample","group",batches)
+  } else {
+    grouping_tbl = metadata_combined[,c(sample_id, group_id)] %>% 
+      tibble::as_tibble() %>% distinct()
+    colnames(grouping_tbl) = c("sample","group")
+  }
+  
+    prioritization_tables = suppressMessages(multinichenetr::generate_prioritization_tables(
+        sender_receiver_info = abundance_expression_info$sender_receiver_info,
+        sender_receiver_de = sender_receiver_de,
+        ligand_activities_targets_DEgenes = ligand_activities_targets_DEgenes,
+        contrast_tbl = contrast_tbl,
+        sender_receiver_tbl = sender_receiver_tbl,
+        grouping_tbl = grouping_tbl,
+        scenario = "regular", # all prioritization criteria will be weighted equally #lower_DE,regular
+        fraction_cutoff = fraction_cutoff, 
+        abundance_data_receiver = abundance_expression_info$abundance_data_receiver,
+        abundance_data_sender = abundance_expression_info$abundance_data_sender,
+        ligand_activity_down = ligand_activity_down
+      ))
+  prioritization_tables$group_prioritization_tbl$group %>% unique()
+  
+  dim(prioritization_tables$group_prioritization_tbl) 
+  dim(prioritization_tables$group_prioritization_table_source)
+  
+  # Identify the rows in sender_receiver_de that meet the criteria
+  valid_combinations <- DE_info$celltype_de$de_output_tidy %>%
+    filter(p_val < 0.05, abs(logFC) > 0.5) %>%
+    select(contrast, cluster_id, gene) %>% mutate(sender = cluster_id, ligand = gene)   
+  
+  # Count the number of rows that do NOT meet the criteria
+  num_non_matching <- prioritization_tables$group_prioritization_tbl %>%
+    anti_join(valid_combinations, by = c("contrast", "sender", "ligand")) %>%
+    nrow()
+  
+  # Print the result
+  num_non_matching
+  
+  lr_target_prior_cor = lr_target_prior_cor_inference(
+  receivers_oi = prioritization_tables$group_prioritization_tbl$receiver %>% unique(), 
+  abundance_expression_info = abundance_expression_info, 
+  celltype_de = celltype_de, 
+  grouping_tbl = grouping_tbl, 
+  prioritization_tables = prioritization_tables, 
+  ligand_target_matrix = ligand_target_matrix, 
+  logFC_threshold = logFC_threshold, 
+  p_val_threshold = p_val_threshold, 
+  p_val_adj = p_val_adj
+  )
+  
+  lr_target_prior_cor_filtered = 
+  prioritization_tables$group_prioritization_tbl$group %>% unique() %>% 
+  lapply(function(group_oi){
+    lr_target_prior_cor_filtered = lr_target_prior_cor %>%
+      inner_join(
+        ligand_activities_targets_DEgenes$ligand_activities %>%
+          distinct(ligand, target, direction_regulation, contrast)
+        ) %>% 
+      inner_join(contrast_tbl) %>% filter(group == group_oi)
+    
+    lr_target_prior_cor_filtered_up = lr_target_prior_cor_filtered %>% 
+      filter(direction_regulation == "up") %>% 
+      filter( (rank_of_target < top_n_target) & (pearson > 0.33))
+    
+    lr_target_prior_cor_filtered_down = lr_target_prior_cor_filtered %>% 
+      filter(direction_regulation == "down") %>% 
+      filter( (rank_of_target < top_n_target) & (pearson < -0.33))
+    lr_target_prior_cor_filtered = bind_rows(
+      lr_target_prior_cor_filtered_up, 
+      lr_target_prior_cor_filtered_down
+      )
+    }) %>% bind_rows()
+
+  lr_target_df = lr_target_prior_cor_filtered %>% 
+    distinct(group, sender, receiver, ligand, receptor, id, target, direction_regulation) 
+  write.csv(lr_target_df, file = paste0(output_dir, "lr_target_df_",i,".csv"), row.names = T)
+  
+  cell_abundance_info_tbl <- table(sce@colData$cell_type_L2,sce@colData$group) %>%
+    as.data.frame() %>% rename(receiver = 'Var1',group = 'Var2')
+  
+  multinichenet_output = list(
+    celltype_info = abundance_expression_info$celltype_info,
+    celltype_de = celltype_de,
+    sender_receiver_info = abundance_expression_info$sender_receiver_info,
+    sender_receiver_de =  sender_receiver_de,
+    ligand_activities_targets_DEgenes = ligand_activities_targets_DEgenes,
+    prioritization_tables = prioritization_tables,
+    grouping_tbl = grouping_tbl,
+    lr_target_prior_cor = lr_target_prior_cor,
+    lr_target_df = lr_target_df,
+    cell_abundance_info_tbl = cell_abundance_info_tbl,
+    abundance_info = abundance_info
+  ) 
+  multinichenet_output = make_lite_output(multinichenet_output)
+  
+  
+
+  save = TRUE
+  if(save == TRUE){
+    saveRDS(multinichenet_output, paste0(output_dir, "multinichenet_output_",i,".rds"))
+  }
+  
+}

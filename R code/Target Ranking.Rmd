@@ -1,0 +1,98 @@
+---
+title: "Target Ranking"
+author: "JD"
+date: "2025-12-04"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(SingleCellExperiment)
+library(dplyr)
+library(ggplot2)
+library(nichenetr)
+library(multinichenetr)
+library(Seurat)
+library(tidyverse)
+library(zellkonverter)
+library(readr)
+
+output_dir = "~/DT/FAP/Verify/"
+if (dir.exists(output_dir)==F) {
+  dir.create(output_dir, showWarnings = FALSE)
+} else {
+  print("The directory already exists")
+}
+```
+
+
+```{r}
+FAP_list <- c("LAMB1", "LAMC2", "TGFBI", "SEMA4D", "AGRN", "SEMA5A", "SEMA3F", "INHBA", "LAMA5", "COL7A1")
+```
+
+### FAP list target ranking 
+
+```{r}
+library(readr)
+lr_target_df_1 <- read_csv("~/DT/FAP/lr_target_df_1.csv",show_col_types = F)
+DE_output_contrastlist_1 <- read_csv("~/DT/FAP/DE_output_contrastlist_1.csv",show_col_types = F)
+```
+
+
+```{r}
+# get logFC for each target in each receiver cluster
+df <- lr_target_df_1 %>%
+  left_join(DE_output_contrastlist_1, 
+            by = c("target" = "gene", "receiver" = "cluster_id"))
+```
+
+
+```{r}
+ligand_counts <- df %>% filter(ligand %in% FAP_list) %>%
+  group_by(target) %>%
+  summarise(num_ligands = n_distinct(ligand), .groups = "drop")
+
+# pivot
+df_wide <- df %>%
+  select(target, ligand, logFC) %>%
+  distinct() %>%
+  pivot_wider(
+    names_from = ligand,
+    values_from = logFC,
+    values_fn = sum
+  ) %>% select(target,all_of(FAP_list)) 
+
+# Combine with ligand counts
+score_df <- ligand_counts %>%
+  left_join(df_wide, by = "target") %>% mutate(TE = rowSums(across(all_of(FAP_list)),na.rm = T))
+```
+
+```{r}
+score_df <- score_df %>%
+  arrange(desc(abs(TE))) %>% select(target, num_ligands, TE) 
+# save score
+```
+
+```{r}
+#plot
+p <- score_df %>% 
+  ggplot(aes(x = num_ligands , y = abs(TE))) +
+  geom_point(size = 2, color = "#0073C2") +  # Add color and size to points for clarity
+  geom_text(aes(label = target), hjust = 1, vjust = 1, size = 3) +  # Adjust text size
+  theme_classic() +  # Use a clean theme
+  labs(
+    x = "Num of Ligands", 
+    y = "Absolute logFC", 
+    title = paste("Abs(Log FC) vs Num of Ligands")
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 10),      
+    axis.text.y = element_text(size = 10),                             
+    panel.background = element_rect(fill = "white", color = "white"),  
+    plot.background = element_rect(fill = "white", color = NA),        
+    panel.grid.major = element_line(color = "gray90"),                  
+    panel.grid.minor = element_blank()                                  
+        )
+
+p

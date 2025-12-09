@@ -1,0 +1,202 @@
+---
+title: "Ligand Ranking"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(SingleCellExperiment)
+library(dplyr)
+library(ggplot2)
+library(nichenetr)
+library(multinichenetr)
+library(Seurat)
+library(tidyverse)
+library(zellkonverter)
+library(readr)
+
+output_dir = "~/DT/FAP/"
+if (dir.exists(output_dir)==F) {
+  dir.create(output_dir, showWarnings = FALSE)
+} else {
+  print("The directory already exists")
+}
+
+Disease = "FAP"
+```
+
+Load the file
+```{r}
+multinichenet_output <- readRDS(file = paste0(output_dir,'multinichenet_output_1.rds'))
+```
+
+Fetch the required objects and join with prioritization table by the id column
+```{r}
+prioritization_tables <- multinichenet_output$prioritization_tables
+cell_abundance_info_tbl <- multinichenet_output$cell_abundance_info_tbl %>% rename(receiver = Var1,group = Var2)
+lr_target_df <- multinichenet_output$lr_target_df
+
+lr_target_df = lr_target_df %>% left_join(prioritization_tables$group_prioritization_tbl %>% select(id, prioritization_score), by = c("id"))
+
+lr_target_df$ligand %>% unique() %>% length()
+```
+
+plot bar graph to see top ligands by number of targets
+
+```{r}
+lr_target_df %>% 
+  group_by(ligand) %>% 
+  summarise(n = n()) %>% 
+  arrange(desc(n)) %>% 
+  ggplot(aes(x = reorder(ligand, -n), y = n)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "Ligand", y = "Number of targets")
+```
+
+```{r}
+cell_abundance_info_tbl = cell_abundance_info_tbl %>% filter(group == "FAP_Polyp") %>% mutate(sender = receiver,prop = Freq/sum(Freq))
+num_cells <-sum(cell_abundance_info_tbl$Freq)
+
+prioritization_score_ligand <- lr_target_df %>% group_by(group,ligand,receiver) %>%
+    summarise(total = n(),
+              prioritization_score = mean(prioritization_score,na.rm = TRUE)) %>% left_join(cell_abundance_info_tbl,by = c('receiver','group')) %>%
+    mutate(cumulative_effect = (total) * prop) %>% arrange(desc(cumulative_effect)) %>%
+    group_by(ligand,group) %>%
+    mutate(total_cumulative_per_ligand = sum(cumulative_effect,na.rm = TRUE),
+           mean_prior_score = mean(prioritization_score),
+           max_prior_score = max(prioritization_score),
+           sum_prior_score = sum(prioritization_score)) %>% distinct()
+  # distinct(ligand,total_cumulative_per_ligand,mean_prior_score)
+
+
+# plot the mean and sum, with sum in x axis, mean for y axis
+p <- prioritization_score_ligand %>% 
+  ggplot(aes(x = total_cumulative_per_ligand, y = max_prior_score)) +
+  geom_point(size = 2, color = "#0073C2") +  # Add color and size to points for clarity
+  geom_text(aes(label = ligand), hjust = 1, vjust = 1, size = 3) +  # Adjust text size
+  theme_classic() +  # Use a clean theme
+  labs(
+    x = "Num Downstream Targets", 
+    y = "Max of Prioritization Score", 
+    title = paste("Prioritization Scores in ",Disease)
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 10),      
+    axis.text.y = element_text(size = 10),                             
+    panel.background = element_rect(fill = "white", color = "white"),  
+    plot.background = element_rect(fill = "white", color = NA),        
+    panel.grid.major = element_line(color = "gray90"),                  
+    panel.grid.minor = element_blank()                                  
+        )
+
+p
+#ggsave(file.path(output_dir, paste("Prioritization Scores for in ",Disease,".png", sep = "")), 
+      # plot = p, width = 15, height = 10, dpi = 300)
+
+```
+
+```{r}
+saveRDS(prioritization_score_ligand,file = paste0(output_dir,paste('prioritization_score_ligand_',Disease,'.rds',sep = '')))
+```
+
+
+### Ranking and plotting
+
+```{r}
+#load multinichenetobject 2
+multinichenet_output_2 <- readRDS(file = paste0(output_dir,'multinichenet_output_2.rds'))
+```
+
+## filtering 
+```{r}
+DE_output_contrastlist_2 <- read_csv(paste0(output_dir,"DE_output_contrastlist_2.csv"))
+
+# filter DE for contrasts 
+DE_FAP_Polyp_vs_Healthy <- DE_output_contrastlist_2 %>%
+  filter(contrast == 'FAP_Polyp-Healthy_Normal') #%>% filter(gene %in% common_ligands)
+DE_FAP_Unaffected_vs_Healthy <- DE_output_contrastlist_2 %>%
+  filter(contrast == 'FAP_Unaffected-Healthy_Normal') #%>% filter(gene %in% common_ligands)
+
+DE_wide <- DE_FAP_Unaffected_vs_Healthy %>%
+      select(gene,cluster_id,logFC, p_adj) %>%
+      rename(logFC_FAP_Unaffected = logFC,
+             p_adj_FAP_Unaffected = p_adj) %>%
+  inner_join(DE_FAP_Polyp_vs_Healthy %>%
+  select(gene,cluster_id, logFC, p_adj) %>%
+  rename(logFC_FAP_Polyp = logFC,
+         p_adj_FAP_Polyp = p_adj),
+    by = c('gene','cluster_id')
+  ) %>% mutate(DEG_FLAG = (logFC_FAP_Unaffected * logFC_FAP_Polyp) > 0 ) %>% filter(DEG_FLAG == TRUE)
+
+
+
+
+
+```
+
+
+## Check number of targets per ligand across conditions 
+
+```{r}
+gene_list <- multinichenet_output_2$celltype_de %>% 
+  filter(contrast == 'FAP_Unaffected-Healthy_Normal') %>%
+  select(gene) %>% distinct()
+
+lrtdf <- multinichenet_output_2$lr_target_df %>%
+  filter(group == 'FAP_Unaffected')
+# for each gene, count number of target in lr_target_df (FAP_Unaffected vs Healthy)
+ligand_target_counts_FAP_Unaffected <- gene_list %>%
+  rowwise() %>%
+  mutate(n_targets = sum(lrtdf$ligand == gene, na.rm = TRUE)) %>%
+  ungroup() 
+
+ligand_target_counts_FAP_Polyp <- multinichenet_output_2$lr_target_df %>% filter(group == 'FAP_Polyp') %>%
+  group_by(ligand) %>%
+  summarise(num_targets = n()) %>%
+  ungroup() 
+#ligand_target_counts_FAP_Unaffected <- ligand_target_counts$FAP_Unaffected
+
+ligand_comparison <- ligand_target_counts_FAP_Polyp %>%
+  left_join(ligand_target_counts_FAP_Unaffected, 
+            by = c("ligand" = "gene")) %>%
+  mutate(inc_target_vs_prev_stage =  num_targets >= n_targets)
+
+filtered_ligand_comparison <- ligand_comparison %>%
+  filter(inc_target_vs_prev_stage == T) 
+
+```
+```{r}
+multinichenet_output_1 <- readRDS(file = paste0(output_dir,'multinichenet_output_1.rds'))
+```
+
+
+```{r}
+sys.source(file = '~/DT/R scripts/ranking.R',envir = environment())
+
+```
+
+```{r}
+# group of interest
+goi <- 'FAP_Polyp' ## choose group
+obj <- multinichenet_output ## choose multinichenet obj
+
+sce <- readRDS(file = "~/DT/FAP/colon_all_samples_ctL2.rds")
+sce <- as.SingleCellExperiment(sce)
+sce <- sce %>% makenames_SCE()
+sce = alias_to_symbol_SCE(sce, "human") %>% makenames_SCE()
+num_cells <- table(sce@colData$group) %>% data.frame() %>% dplyr::filter(Var1 == goi) %>% dplyr::pull(Freq)
+
+filtered_df <- obj$lr_target_df %>% filter(ligand %in% filtered_ligand_comparison$ligand)
+
+holding_cell <- gene_ranking(sender_receiver_de = obj$sender_receiver_de,
+                            prioritization_tables = obj$prioritization_tables,
+                            lr_target_df = filtered_df,
+                            cell_abundance_info= obj$cell_abundance_info_tbl %>%
+                              rename(receiver = Var1,group = Var2),
+                            num_cells = num_cells)
+saveRDS(holding_cell$total_score_per_ligand, file = paste0(output_dir,'ranking.rds'))
+
+
+```
