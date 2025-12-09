@@ -173,7 +173,54 @@ multinichenet_output_1 <- readRDS(file = paste0(output_dir,'multinichenet_output
 
 
 ```{r}
-sys.source(file = '~/DT/R scripts/ranking.R',envir = environment())
+gene_ranking <- function(sender_receiver_de,prioritization_tables,lr_target_df,cell_abundance_info_tbl,num_cells){
+  
+  require(dplyr)
+  
+  
+  rank_lfc_ligand <- sender_receiver_de %>% dplyr::select(contrast,sender,ligand,lfc_ligand) %>% 
+    dplyr::distinct() %>% dplyr::arrange(desc(abs(lfc_ligand)))
+  
+  rank_lfc_avg <- sender_receiver_de %>% dplyr::select(contrast,sender,ligand,receptor,ligand_receptor_lfc_avg) %>% 
+    dplyr::distinct() %>% dplyr::arrange(desc(abs(ligand_receptor_lfc_avg)))
+  
+  rank_prioritization_score <- prioritization_tables$group_prioritization_table_source %>% 
+    dplyr::select(contrast,sender,ligand,prioritization_score) %>% dplyr::distinct() %>% 
+    dplyr::arrange(desc(abs(prioritization_score)))
+  
+  top_target_genes <- lr_target_df %>% dplyr::group_by(group,sender,ligand,receiver) %>% 
+    dplyr::summarise(total_vals = n())
+  
+  top_ligand_target <- lr_target_df %>% dplyr::group_by(sender,ligand,target) %>% 
+    dplyr::summarise(total = n()) %>% dplyr::arrange(desc(total))
+  
+  
+  weighted_df <- lr_target_df %>% dplyr::group_by(group,sender,ligand,receiver) %>% 
+    dplyr::summarise(total = n()) %>% dplyr::left_join(cell_abundance_info_tbl,by = c('receiver','group')) %>% 
+    dplyr::mutate(cumulative_effect = total * (Freq/num_cells)) %>% dplyr::arrange(desc(cumulative_effect)) %>% 
+    dplyr::group_by(sender,ligand) %>%
+    dplyr::summarise(total_cumulative_per_ligand = sum(cumulative_effect,na.rm = TRUE))
+  
+  total_score_per_ligand <- weighted_df %>% dplyr::group_by(ligand) %>% 
+    dplyr::summarise(total_score = sum(total_cumulative_per_ligand,na.rm = TRUE),.groups = 'drop') 
+  
+  total_score_per_ligand <- total_score_per_ligand %>% 
+    dplyr::mutate(ligand = factor(ligand, 
+                           levels = total_score_per_ligand$ligand[order(-total_score_per_ligand$total_score)])) %>% 
+    dplyr::arrange(desc(total_score)) 
+  
+  holding_cell <- list(
+    rank_lfc_ligand = rank_lfc_ligand,
+    rank_lfc_avg = rank_lfc_avg,
+    rank_prioritization_score= rank_prioritization_score,
+    top_target_genes= top_target_genes,
+    top_ligand_target= top_ligand_target,
+    weighted_df= weighted_df,
+    total_score_per_ligand= total_score_per_ligand
+  )
+  
+  return(holding_cell)
+}
 
 ```
 
