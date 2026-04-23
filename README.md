@@ -12,11 +12,12 @@ A 19-gene FdS was identified. Supporting its relevance for malignant transformat
 
 This study introduces a novel framework based on Mendelian disease modeling to prioritize disease genes, biomarkers, natural compounds, and drugs for potential early diagnosis and prevention of malignant transformation in CRC. Natural compounds may merit further studies for long-term preventive treatments because of their low cost and limited side effects. 
 
-### The code is written in R and Python. The code is organized into the following directories:
-
-R code/: R script for the MCNM construction, Immunohistochemistry (IHC), Spatial Transcriptomics, proteomics and machine learning analyses. R (version 4.2.2) 
-
-Python code/: Python script for pathway and drug enrichment. Python (version 3.12) 
-
 <img width="895" height="726" alt="image" src="https://github.com/user-attachments/assets/00ae94ee-a799-4ac4-b5b8-240883515ad6" />
+
+
+The code is written in R and Python. The code is organized into the following directories:
+
+R code: R script for the MCNM construction, Immunohistochemistry (IHC), Spatial Transcriptomics, proteomics and machine learning analyses. R (version 4.2.2) 
+
+Python code: Python script for pathway and drug enrichment. Python (version 3.12) 
 
